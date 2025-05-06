@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify, render_template_string
-from predict import estimate_nutrition, predict_cnn, get_calories
+from predict import estimate_nutrition, predict_cnn, get_calories, get_nutrition_label
 import os
 import json
 import pickle
@@ -7,7 +7,6 @@ from torchvision import transforms
 import torch
 import time
 from PIL import Image
-
 app = Flask(__name__)
 
 #load USDA data
@@ -53,17 +52,22 @@ def index():
 
                 #get calorie info from USDA JSON
                 calories = get_calories(usda_data, cnn_prediction)
+                calories_og = calories;
 
                 #suggest substitutes
                 substitutions_map = substitutions["General Substitutions"][0]
                 subs = substitutions_map.get(cnn_prediction.lower(), ["none"])
                 print(f"Substitutes for {cnn_prediction}: {subs}")
                 
-                #if no calorie data is present for CNN prediction, check if subsitutes ar present in USDA db
+                
+
+                #if no calorie data is present for CNN prediction, check if subsitutes are present in USDA db
                 if(calories == 0):
                     calories_sub0 = get_calories(usda_data, subs[0])
                     calories_sub1 = get_calories(usda_data, subs[1])
                     calories_sub2 = get_calories(usda_data, subs[2])
+
+                    #if so, set calorie nd nutrition label to that of "close" food
                     if(calories_sub0 != 0):
                         calories = calories_sub0
                     elif(calories_sub1 != 0):
@@ -74,12 +78,29 @@ def index():
                 #extract calorie amount from main food (or one of 3 subs if needed)
                 nutrient_info = estimate_nutrition("uploads/test_image.png", cnn_prediction, calories, 0.5)
 
+                #get nutrition
+                nutrition_label = get_nutrition_label(cnn_prediction, usda_data)
+
+                #if no calorie data is present for CNN prediction, use substitute for nutrition info
+                if(calories_og == 0):
+                    nutrition_label0 = get_nutrition_label(subs[0], usda_data)
+                    nutrition_label1 = get_nutrition_label(subs[1], usda_data)
+                    nutrition_label2 = get_nutrition_label(subs[2], usda_data)
+
+                    #if so, set nutrition label to that of "close" food
+                    if(calories_sub0 != 0):
+                        nutrition_label = nutrition_label0
+                    elif(calories_sub1 != 0):
+                        nutrition_label = nutrition_label1
+                    elif(calories_sub2 != 0):
+                        nutrition_label = nutrition_label2
+
             except Exception as e: #if an error is thrown, give pop-up bx and forc user back to homepage
                 return render_template_string(f''' <script>alert("Error: {str(e)}"); window.location.href = "/";</script>''')
             return f'''
                 <html>
                 <head>
-                    <title>Food Image Classification with Nutrition Analysis and Ingredient Substitution</title>
+                    <title>Food Classification Result</title>
                     <style>
                         body {{
                             background-color: #e6ffe6;
@@ -94,11 +115,6 @@ def index():
                             max-width: 800px;
                             margin: auto;
                         }}
-                        h1 {{
-                            text-align: center;
-                            color: #2e7d32;
-                            margin-bottom: 30px;
-                        }}
                         .result {{
                             display: flex;
                             gap: 20px;
@@ -112,17 +128,6 @@ def index():
                             border-radius: 5px;
                             flex: 1;
                         }}
-                        .nutrition table {{
-                            width: 100%;
-                            border-collapse: collapse;
-                        }}
-                        .nutrition table, .nutrition th, .nutrition td {{
-                            border: 1px solid #ccc;
-                        }}
-                        .nutrition th, .nutrition td {{
-                            padding: 8px 12px;
-                            text-align: left;
-                        }}
                         .preview {{
                             flex: 1;
                         }}
@@ -135,18 +140,34 @@ def index():
                         .btn {{
                             display: inline-block;
                             padding: 10px 20px;
-                            margin-top: 30px;
+                            margin-top: 20px;
                             background-color: #4caf50;
                             color: white;
                             text-decoration: none;
                             border-radius: 5px;
-                            text-align: center;
                         }}
-                        .footer {{
-                            margin-top: 40px;
-                            text-align: center;
-                            font-size: 0.9em;
-                            color: #555;
+                        #popup {{
+                            display: none;
+                            position: fixed;
+                            top: 10%;
+                            left: 50%;
+                            transform: translateX(-50%);
+                            background: white;
+                            border: 2px solid #4caf50;
+                            padding: 20px;
+                            width: 300px;
+                            z-index: 1000;
+                            box-shadow: 0 0 15px rgba(0, 0, 0, 0.3);
+                        }}
+                        #popup h3 {{
+                            margin-top: 0;
+                            border-bottom: 2px solid black;
+                        }}
+                        #popup .nutrient {{
+                            display: flex;
+                            justify-content: space-between;
+                            padding: 4px 0;
+                            font-size: 14px;
                         }}
                     </style>
                 </head>
@@ -164,6 +185,7 @@ def index():
                                     <li>{subs[1]}</li>
                                     <li>{subs[2]}</li>
                                 </ul>
+                                <button class="btn" onclick="document.getElementById('popup').style.display='block'">View Full Nutrition Label</button>
                             </div>
                             <div class="preview">
                                 <img src="/static/output.png" alt="Detected Image">
@@ -173,12 +195,21 @@ def index():
                             <a class="btn" href="/">Try another image</a>
                         </div>
                     </div>
-                    <div class="footer">
-                        Created by Andrew McMahon • CPR E 575 - ISU • Spring 2025
+
+                    <!-- Nutrition Facts Modal -->
+                    <div id="popup">
+                        <h3>Nutrition Facts</h3>
+                        <div>
+                            {"".join([f"<div class='nutrient'><b>{k}</b><span>{v}</span></div>" for k, v in nutrition_label.items()])}
+                        </div>
+                        <div style="text-align:center; margin-top: 15px;">
+                            <button onclick="document.getElementById('popup').style.display='none'" class="btn">Close</button>
+                        </div>
                     </div>
                 </body>
                 </html>
-            '''
+                '''
+
     return '''
         <html>
         <head>

@@ -7,6 +7,7 @@ import numpy as np
 from PIL import Image   
 from torchvision.models import resnet18
 import matplotlib.pyplot as plt
+import matplotlib
 import difflib  # for optional fuzzy matching
 from flask import Flask, request, jsonify
 import os
@@ -16,25 +17,82 @@ from torchvision import transforms
 import torch
 import time
 from PIL import Image
+food_mass_g = 0
 
 with open('../models/classes.txt') as f:
     model_classes = [line.strip() for line in f]
 
 def get_calories(usda_data, cnn_prediction):
-    for item in usda_data.get("FoundationFoods", []):
+    fallback = cnn_prediction[:-1] if cnn_prediction.endswith("s") else cnn_prediction
+    query_tokens = set(fallback.lower().split())
 
-        #if detected food is plural, chop the "s" off
-        if len(cnn_prediction) >= 1:
-            temp = cnn_prediction[0:len(cnn_prediction)-1]
-        if (cnn_prediction.lower() in item.get("description", "").lower()) or (temp.lower() in item.get("description", "").lower()):
+    for item in usda_data.get("FoundationFoods", []):
+        description = item.get("description", "").lower()
+        desc_tokens = set(description.replace(",", "").split())
+
+        if query_tokens & desc_tokens:  # set intersection
             for nutrient in item.get("foodNutrients", []):
                 if (
                     nutrient.get("nutrient", {}).get("name") == "Energy" and
                     nutrient.get("nutrient", {}).get("unitName") == "kcal"
                 ):
                     return nutrient.get("amount", 0.0)
+
     return 0.0  # fallback if nothing matches
 
+
+def get_nutrition_label(cnn_prediction, usda_data):
+    multiplier = food_mass_g / 100
+    target_names = {
+        "Protein": "Protein (g)",
+        "Total lipid (fat)": "Fat (g)",
+        "Carbohydrate, by difference": "Carbs (g)",
+        "Fiber, total dietary": "Fiber (g)",
+        "Sugars, total including NLEA": "Sugar (g)",
+        "Vitamin C, total ascorbic acid": "Vitamin C (mg)",
+        "Vitamin A, RAE": "Vitamin A (µg RAE)",
+        "Vitamin D (D2 + D3)": "Vitamin D (µg)",
+        "Vitamin B-12": "Vitamin B12 (µg)",
+        "Vitamin B-6": "Vitamin B6 (mg)",
+        "Folate, total": "Folate (µg)",
+        "Niacin": "Niacin (mg)",
+        "Thiamin": "Thiamin (mg)",
+        "Riboflavin": "Riboflavin (mg)",
+        "Vitamin E (alpha-tocopherol)": "Vitamin E (mg)",
+        "Calcium, Ca": "Calcium (mg)",
+        "Iron, Fe": "Iron (mg)",
+        "Potassium, K": "Potassium (mg)",
+        "Sodium, Na": "Sodium (mg)",
+        "Magnesium, Mg": "Magnesium (mg)",
+        "Zinc, Zn": "Zinc (mg)",
+        "Phosphorus, P": "Phosphorus (mg)",
+        "Copper, Cu": "Copper (mg)",
+        "Manganese, Mn": "Manganese (mg)",
+        "Selenium, Se": "Selenium (µg)"
+    }
+
+    #cut off plural form if needed
+    fallback = cnn_prediction[:-1] if cnn_prediction.endswith("s") else cnn_prediction
+    query_tokens = set(fallback.lower().split())
+    for item in usda_data.get("FoundationFoods", []):
+        description = item.get("description", "").lower()
+        desc_tokens = set(description.replace(",", "").split())
+        if query_tokens & desc_tokens:  # set intersection
+            nutrients = item.get("foodNutrients", [])
+            nutrient_map = {n["nutrient"]["name"]: n for n in nutrients} 
+            result = {}
+            #loop target names mapping to append nutrient values in pre-determined order
+            for key in target_names:
+                if key in nutrient_map:
+                    n = nutrient_map[key]
+                    amount = multiplier * n.get("amount", 0)
+                    unit = n["nutrient"].get("unitName", "").lower()
+                    result[target_names[key]] = f"{round(amount, 2)} {unit}"
+                else:
+                    result[target_names[key]] = "-"
+            return result
+    #fallback if nothing matched
+    return {v: "-" for v in target_names.values()}
 
 def predict_cnn(img_path, model, transform):
     img = Image.open(img_path).convert('RGB')
@@ -48,6 +106,7 @@ def predict_cnn(img_path, model, transform):
     return predicted_labels[0], predicted_labels #return top-1 label s well as top 5
 
 def estimate_nutrition(image_path, food_label="unknown", calories_per_100g=250, density_g_cm3=0.5):
+    matplotlib.use('Agg')  #use non-GUI backend: safe for Flask
     image = cv2.imread(image_path)
     if image is None:
         raise FileNotFoundError("Image not found")
@@ -102,8 +161,10 @@ def estimate_nutrition(image_path, food_label="unknown", calories_per_100g=250, 
     food_area_cm2 = food_area_px * (px_to_cm ** 2)
     food_height_cm = h_box * px_to_cm
     food_volume_cm3 = food_area_cm2 * food_height_cm
+    global food_mass_g
     food_mass_g = food_volume_cm3 * density_g_cm3
     calories = (food_mass_g / 100) * calories_per_100g
+
 
     #visualization
     vis = image.copy()
