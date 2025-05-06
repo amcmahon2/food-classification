@@ -47,15 +47,6 @@ def predict_cnn(img_path, model, transform):
         predicted_labels = [model_classes[i] for i in predicted_indices]
     return predicted_labels[0], predicted_labels #return top-1 label s well as top 5
 
-def is_circular(contour, threshold=0.7):
-    perimeter = cv2.arcLength(contour, True)
-    area = cv2.contourArea(contour)
-    if perimeter == 0:
-        return False
-    circularity = 4 * np.pi * (area / (perimeter * perimeter))
-    return circularity > threshold
-
-
 def estimate_nutrition(image_path, food_label="unknown", calories_per_100g=250, density_g_cm3=0.5):
     image = cv2.imread(image_path)
     if image is None:
@@ -68,64 +59,69 @@ def estimate_nutrition(image_path, food_label="unknown", calories_per_100g=250, 
         scale = MAX_DIM / max(h, w)
         image = cv2.resize(image, (int(w * scale), int(h * scale)))
 
-    #preprocessing
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.medianBlur(gray, 7)
-    edges = cv2.Canny(blurred, 50, 150)
+    gray_blurred = cv2.medianBlur(gray, 7)
 
-    #find contours
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if len(contours) < 2:
-        raise ValueError("Need at least two objects (food + reference coin)")
-    
-    #filter only circular contours (likely quarters)
-    circular_contours = [c for c in contours if is_circular(c)]
-    if len(circular_contours) == 0:
-        raise ValueError("No circular reference object (e.g., quarter) found!")
+    #Hough Circle Detection
+    circles = cv2.HoughCircles(
+        gray_blurred, cv2.HOUGH_GRADIENT, dp=1.2, minDist=30,
+        param1=100, param2=30, minRadius=10, maxRadius=100
+    )
 
-    #assume largest circular object is the quarter
-    ref_contour = max(circular_contours, key=cv2.contourArea)
+    if circles is None:
+        raise ValueError("No circular reference (quarter) found!")
 
-    #sort contours by area
-    contours = sorted(contours, key=cv2.contourArea, reverse=True)
-    food_contour = contours[0]
-    ref_contour = contours[1]
+    #convert (x, y, r) to integers
+    circles = np.uint16(np.around(circles))
+    ref_circle = max(circles[0], key=lambda c: c[2])  # largest circle
 
-    #use U.S. quarter as reference object (diameter = 2.426 cm)
-    ((ref_x, ref_y), ref_radius) = cv2.minEnclosingCircle(ref_contour)
-    ref_diameter_px = 2 * ref_radius
+    #use diameter in pixels to get conversion ratio
+    ref_radius_px = ref_circle[2]
+    ref_diameter_px = 2 * ref_radius_px
     REF_DIAMETER_CM = 2.426
     px_to_cm = REF_DIAMETER_CM / ref_diameter_px
 
-    #food bounding box
-    x, y, w, h = cv2.boundingRect(food_contour)
+    #canny + contour for food region
+    edges = cv2.Canny(gray_blurred, 50, 150)
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if len(contours) < 1:
+        raise ValueError("No food contour found")
+
+    #combine all contours excluding the quarter area
+    food_contours = []
+    for c in contours:
+        (x, y), radius = cv2.minEnclosingCircle(c)
+        if abs(radius - ref_radius_px) > 10:
+            food_contours.append(c)
+    if len(food_contours) == 0:
+        raise ValueError("No valid food region found")
+    combined = np.vstack(food_contours)
+    food_contour = cv2.convexHull(combined)
+    x, y, w_box, h_box = cv2.boundingRect(food_contour)
     food_area_px = cv2.contourArea(food_contour)
     food_area_cm2 = food_area_px * (px_to_cm ** 2)
-
-    #approximate height
-    food_height_cm = h * px_to_cm
-
-    #estimate volume, mass, and calories
+    food_height_cm = h_box * px_to_cm
     food_volume_cm3 = food_area_cm2 * food_height_cm
     food_mass_g = food_volume_cm3 * density_g_cm3
-   
     calories = (food_mass_g / 100) * calories_per_100g
 
-
-    #visualize
+    #visualization
     vis = image.copy()
-    cv2.drawContours(vis, [food_contour], -1, (0, 255, 0), 2)
-    cv2.drawContours(vis, [ref_contour], -1, (255, 0, 0), 2)
-    cv2.rectangle(vis, (x, y), (x + w, y + h), (0, 255, 255), 2)
+    cv2.drawContours(vis, [food_contour], -1, (0, 0, 204), 2)
+    cv2.rectangle(vis, (x, y), (x + w_box, y + h_box), (255, 102, 178), 2)
+    #cv2.circle(vis, (ref_circle[0], ref_circle[1]), ref_radius_px, (0, 255, 255), 2)
     vis_rgb = cv2.cvtColor(vis, cv2.COLOR_BGR2RGB)
 
-    #plot the image
-    # plt.figure(figsize=(8, 6))
-    # plt.imshow(vis_rgb)
-    # plt.title(f"Green: Food | Blue: Reference (Quarter) | Yellow: Height Box")
-    # plt.axis("off")
-    # plt.tight_layout()
-    # plt.show()
+    plt.figure(figsize=(8, 6))
+    plt.imshow(vis_rgb)
+    plt.title("Red: Food, Blue: Bounding box")
+    plt.axis("off")
+    plt.tight_layout()
+    #plt.show()
+    os.makedirs("static", exist_ok=True)
+    plt.savefig("static/output.png")
+    plt.close()
+
 
     return f"""
     <table border="1" cellpadding="8" cellspacing="0">
@@ -138,6 +134,9 @@ def estimate_nutrition(image_path, food_label="unknown", calories_per_100g=250, 
     <tr><td>Estimated Calories</td><td>{round(calories, 2)} kcal</td></tr>
     </table>
     """
+
+
+
 
 #old code which uses ORB
 
